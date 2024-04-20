@@ -1,0 +1,384 @@
+#include <Adafruit_Fingerprint.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <Servo.h>
+
+#if (defined(__AVR__) || defined(ESP8266)) && !defined(__AVR_ATmega2560__)
+SoftwareSerial mySerial(2, 3);
+#else
+#define mySerial Serial1
+#endif
+
+Adafruit_Fingerprint finger = Adafruit_Fingerprint(&mySerial);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+Servo doorServo;
+
+const int ledPin = 13;       // General LED indicator pin
+const int greenLedPin = 7;   // Green LED for access granted
+const int redLedPin = 8;     // Red LED for access denied
+const int buzzerPin = 4;     // Buzzer pin for additional indication
+const int whiteLedPin = 12;  // White LED for fingerprint not found
+const int pushButtonPin = 11; // Pin for the manual control push button
+
+const int servoClosedPosition = 90;
+const int servoOpenPosition = 0;
+
+int failedAttempts = 0;  // Counter for failed attempts
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(ledPin, OUTPUT);
+  pinMode(greenLedPin, OUTPUT);
+  pinMode(redLedPin, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);
+  doorServo.attach(9); // Attach servo to pin 9
+  pinMode(whiteLedPin, OUTPUT);
+  pinMode(pushButtonPin, INPUT_PULLUP); // Configure push button pin as input with internal pull-up resistor
+  digitalWrite(whiteLedPin, LOW);  // Initially turn off the white LED
+
+  // Other setup code...
+  
+  while (!Serial);
+  delay(100);
+  Serial.println("\n\nAdafruit Fingerprint sensor enrollment");
+
+  lcd.begin();
+  lcd.print("Build By:");
+  lcd.setCursor(0, 1);
+  lcd.print("Safkhan Cader..");
+  delay(3000);
+
+  lcd.begin();
+  lcd.print("Start Fingerprint");
+  lcd.setCursor(0, 1);
+  lcd.print("to Enrollment");
+  delay(2000);
+
+  finger.begin(57600);
+
+  if (finger.verifyPassword()) {
+    Serial.println("Found fingerprint sensor!");
+    lcd.clear();
+    lcd.print("Sensor Found");
+  } else {
+    Serial.println("Did not find fingerprint sensor :(");
+    lcd.clear();
+    lcd.print("Sensor Not Found");
+    while (1) {
+      delay(1);
+    }
+  }
+
+  Serial.println(F("Reading sensor parameters"));
+  finger.getParameters();
+  Serial.print(F("Status: 0x"));
+  Serial.println(finger.status_reg, HEX);
+  Serial.print(F("Sys ID: 0x"));
+  Serial.println(finger.system_id, HEX);
+  Serial.print(F("Capacity: "));
+  Serial.println(finger.capacity);
+  Serial.print(F("Security level: "));
+  Serial.println(finger.security_level);
+  Serial.print(F("Device address: 0x"));
+  Serial.println(finger.device_addr, HEX);
+  Serial.print(F("Packet len: "));
+  Serial.println(finger.packet_len);
+  Serial.print(F("Baud rate: "));
+  Serial.println(finger.baud_rate);
+
+  enrollFingerprints();
+}
+
+void loop() {
+  int fingerprintID = getFingerprintIDez();
+
+  if (fingerprintID != -1) {
+    accessDoor();
+    delay(1000); // Add a delay to avoid continuous checking
+  }
+  
+  // Check if the push button is pressed
+  if (digitalRead(pushButtonPin) == LOW) {
+    manualControl();
+  }
+}
+
+void manualControl() {
+  Serial.println("Manual control activated!");
+  lcd.clear();
+  lcd.print("Manual Control");
+
+  digitalWrite(greenLedPin, HIGH); // Green LED on
+  doorServo.write(servoOpenPosition); // Open the door
+  delay(5000); // Wait for 5 seconds
+  doorServo.write(servoClosedPosition); // Close the door
+
+  // Access granted completed, turn off the LEDs
+  digitalWrite(greenLedPin, LOW); // Green LED off
+  lcd.clear();
+}
+
+void accessDoor() {
+  Serial.println("Access Granted!");
+  lcd.clear();
+  lcd.print("Access Granted!");
+  lcd.setCursor(0, 1);
+  lcd.print("Message Sent.");
+  delay(2000);
+
+  digitalWrite(greenLedPin, HIGH); // Green LED on
+  delay(1000);                      // Wait for 1 second
+
+  lcd.clear();
+  lcd.print("Door Opening!");
+  // Rotate the servo 90 degrees to the right
+  doorServo.write(servoOpenPosition);
+  delay(5000); // Wait for 5 seconds
+
+  lcd.clear();
+  lcd.print("Door Closing!");
+  // Rotate the servo 90 degrees to the left
+  doorServo.write(servoClosedPosition);
+  delay(1000); // Wait for 1 second
+
+  // Access granted completed, turn off the LEDs
+  digitalWrite(greenLedPin, LOW); // Green LED off
+  lcd.clear();
+}
+
+void deniedDoor() {
+  Serial.println("Access Denied!");
+
+  lcd.clear();
+  lcd.print("Access Denied!");
+  lcd.setCursor(0, 1);
+  lcd.print("Message Sent.");
+  delay(2000);
+
+  lcd.clear();
+  lcd.print("Sorry! Try");
+  lcd.setCursor(0, 1);
+  lcd.print("Again...");
+
+  digitalWrite(redLedPin, HIGH); // Red LED on
+  delay(3000);
+  digitalWrite(redLedPin, LOW); // Red LED off
+
+
+  failedAttempts++;
+
+  // Check for the third failed attempt
+  if (failedAttempts >= 3) {
+    // Blink red LED and ring the buzzer for 5 seconds
+    for (int i = 0; i < 10; i++) {
+      digitalWrite(redLedPin, HIGH); // Red LED on
+      tone(buzzerPin, 1000, 250);     // Buzzer sound
+      delay(250);
+      lcd.clear();
+       lcd.print("Alarm Activated..");
+      digitalWrite(redLedPin, LOW);  // Red LED off
+      noTone(buzzerPin);              // Turn off the buzzer
+      delay(250);
+    }
+    failedAttempts = 0;  // Reset the counter after the access denied scenario
+  }
+}
+
+int getFingerprintIDez() {
+  lcd.clear();
+  lcd.print("Place Your");
+  lcd.setCursor(0, 1);
+  lcd.print("Finger...");
+  digitalWrite(whiteLedPin, HIGH); // White LED on (fingerprint not found)
+
+  bool fingerDetected = false;
+
+  while (true) { // Infinite loop for waiting
+    int p = finger.getImage();
+
+    if (p == FINGERPRINT_OK) {
+      fingerDetected = true;
+      digitalWrite(whiteLedPin, LOW); // Turn off the White LED if a fingerprint is detected
+      break;
+    }
+  }
+
+  if (!fingerDetected) {
+    // Finger not detected, handle this case as needed
+    digitalWrite(whiteLedPin, HIGH); // White LED on (fingerprint not found)
+    return -1; // No fingerprint detected
+  }
+
+  int p = finger.image2Tz();
+  if (p != FINGERPRINT_OK) {
+    return -1; // Couldn't convert image to template
+  }
+
+  p = finger.fingerFastSearch();
+  if (p != FINGERPRINT_OK) {
+    deniedDoor();
+    return -1; // Couldn't find matching fingerprint
+  }
+
+  // Found a match!
+  Serial.print("Found ID #");
+  Serial.print(finger.fingerID);
+  Serial.print(" with confidence of ");
+  Serial.println(finger.confidence);
+
+  return finger.fingerID;
+}
+
+void enrollFingerprints() {
+  for (uint8_t id = 1; id <= 5; ++id) {
+    lcd.clear();
+    lcd.print("Press '");
+    lcd.print(id);
+    lcd.print("' to enroll ID ");
+    lcd.print(id);
+
+    // Wait for user input
+    while (true) {
+      if (Serial.available() > 0) {
+        char input = Serial.read();
+        if (input == (id + '0')) {
+          lcd.clear();
+          lcd.print("Enrolling ID #");
+          lcd.print(id);
+          digitalWrite(ledPin, HIGH); // General LED on
+          enrollFingerprint(id);
+          digitalWrite(ledPin, LOW); // General LED off
+          break;
+        } else {
+          lcd.clear();
+          lcd.print("Invalid input");
+          lcd.setCursor(0, 1);
+          lcd.print("Press '");
+          lcd.print(id);
+          lcd.print("'");
+        }
+      }
+    }
+  }
+  // After enrollment, display "Place your finger"
+  lcd.clear();
+  lcd.print("Place your finger");
+}
+
+void enrollFingerprint(uint8_t id) {
+  lcd.clear();
+  lcd.print("Enrolling ID #");
+  lcd.print(id);
+
+  while (!getFingerprintEnroll(id));
+}
+
+  // Image converted, now remove finger
+  Serial.println("Remove finger");
+  delay(2000);
+  p = 0;
+  while (p != FINGERPRINT_NOFINGER) {
+    p = finger.getImage();
+  }
+
+  // Finger removed, now prompt user to place the same finger again
+  Serial.println("Place the same finger again");
+  delay(3000);
+  while (p != FINGERPRINT_OK) {
+    p = finger.getImage();
+    switch (p) {
+      case FINGERPRINT_OK:
+        Serial.println("Image taken");
+        break;
+      case FINGERPRINT_NOFINGER:
+        Serial.print(".");
+        break;
+      case FINGERPRINT_PACKETRECIEVEERR:
+        Serial.println("Communication error");
+        break;
+      case FINGERPRINT_IMAGEFAIL:
+        Serial.println("Imaging error");
+        break;
+      default:
+        Serial.println("Unknown error");
+        break;
+    }
+  }
+
+  // Same finger placed again, now convert
+  delay(2000); // Increase delay before converting image
+  p = finger.image2Tz(2);
+  switch (p) {
+    case FINGERPRINT_OK:
+      Serial.println("Image converted");
+      break;
+    case FINGERPRINT_IMAGEMESS:
+      Serial.println("Image too messy");
+      return p;
+    case FINGERPRINT_PACKETRECIEVEERR:
+      Serial.println("Communication error");
+      return p;
+    case FINGERPRINT_FEATUREFAIL:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    case FINGERPRINT_INVALIDIMAGE:
+      Serial.println("Could not find fingerprint features");
+      return p;
+    default:
+      Serial.println("Unknown error");
+      return p;
+  }
+
+  // Image converted, now create model
+  Serial.print("Creating model for #");
+  Serial.println(id);
+  p = finger.createModel();
+  if (p == FINGERPRINT_OK) {
+    Serial.println("Prints matched!");
+  } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
+    Serial.println("Communication error");
+    return p;
+  } else if (p == FINGERPRINT_ENROLLMISMATCH) {
+    Serial.println("Fingerprints did not match");
+    return p;
+  } else {
+    Serial.println("Unknown error");
+    return p;
+  }
+
+  // Model created, now store
+  Serial.print("ID ");
+  Serial.println(id);
+  p = finger.storeModel(id);
+  if (p == FINGERPRINT_OK) {
+    Serial.println("Stored!");
+    lcd.clear();
+    lcd.print("ID #");
+    lcd.print(id);
+    lcd.print(" Enrolled");
+    delay(3000);
+    lcd.clear();
+    digitalWrite(greenLedPin, HIGH); // Green LED on
+    delay(3000);                      // Wait for 3 seconds
+    digitalWrite(greenLedPin, LOW);  // Green LED off
+  } else if (p == FINGERPRINT_PACKETRECIEVEERR) {
+    Serial.println("Communication error");
+    return p;
+  } else if (p == FINGERPRINT_BADLOCATION) {
+    Serial.println("Could not store in that location");
+    return p;
+  } else if (p == FINGERPRINT_FLASHERR) {
+    Serial.println("Error writing to flash");
+    return p;
+  } else {
+    Serial.println("Unknown error");
+    lcd.clear();
+    lcd.print("Enrollment Failed");
+    digitalWrite(redLedPin, HIGH); // Red LED on
+    delay(3000);                    // Wait for 3 seconds
+    digitalWrite(redLedPin, LOW);  // Red LED off
+    return p;
+  }
+
+  return true;
+}
